@@ -1,4 +1,10 @@
 baseURL: https://confusedbit.dev/
 languageCode: en-us
 title: Confused bit
-theme: "PaperMod"
+theme:
+  - "PaperMod"
+params:
+  custom_css:
+    - "css/admonitions.css"
+relativeURLs: true
+enableEmoji: true
