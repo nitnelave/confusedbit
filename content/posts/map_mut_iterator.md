@@ -1,6 +1,7 @@
 ---
 title: "Teaching the Rust Borrow Checker"
-date: 2023-01-04T09:07:16+01:00
+date: 2023-01-19T09:07:16+01:00
+lastmod: 2023-01-20T09:57:16+01:00
 ---
 
 # Setup
@@ -101,10 +102,10 @@ the same memory, _regardless of whether you access it or not_. That restricts
 us much more than before: we have to look at the implementation of the map to
 see whether we can iterate on the keys (or call `contains_key`) without _ever
 forming a reference to the value_! However, `HashMap` is implemented on top of
-`hashbrown::hash_map`, which underneath is basically a `hash_set<(Key,
-Value)>`. Notably, iterating over the keys is just iterating over the `&(k, v)`
-and then dropping the value: we have a reference to the tuple, so a reference
-to the value.
+`hashbrown::hash_map`, which underneath is basically a
+`hashbrown::hash_set<(Key, Value)>`. Notably, iterating over the keys is just
+iterating over the `&(k, v)` and then dropping the value: we have a reference to
+the tuple, so a reference to the value.
 
 The equivalent code could look like that:
 
@@ -171,22 +172,27 @@ one mutable and one not:
 
 ```rust
 fn update_jumps(map: &mut MyHashMap<Position, Elf>) {
-  let read_only_map = unsafe { &*(map as *const MyHashMap<_, _>) };
   for (position, mut elf) in map.iter_mut() {
-    elf.will_jump_to = if read_only_map.contains_key(&(position + 1)) {
+    let new_jump = if map.contains_key(&(position + 1)) {
       Some(position + 1)
-    } else if read_only_map.contains_key(&(position - 1)) {
+    } else if map.contains_key(&(position - 1)) {
       Some(position - 1)
     } else {
       None
     };
+    let mut mutable_elf = unsafe { &*(elf as *Elf) };
+    mutable_elf.will_jump_to = new_jump;
   }
 }
 ```
 
-That would work, but is quite dangerous: we could easily start using
-`read_only_map` in parallel with `map`, and a future reviewer might not see the
-issue. What we need is to build a _safe_ interface for the pattern, so that it
+That looks like it would work, but it is unsound: we have both a reference to
+`elf` and to `mut elf` at the same time, and in general transmuting from `&T` to
+`&mut T` is _never_ sound.
+
+*EDIT: Thanks to /u/A1oso for pointing that out!*
+
+What we need is to build a _safe_ interface for the pattern, so that it
 cannot be misused.
 
 What do we need?
@@ -259,26 +265,31 @@ already have a non-`mut` reference to the map.
 
 ```rust
 impl<'map, Key: Hash + Eq, Value> MutMapValueAccessor<'map, Key, Value> {
-    fn cast_value_to_mut(val: &Value) -> &mut Value {
-        // Creating a pointer is not unsafe.
-        let val_ptr = val as *mut Value;
-        // Dereferencing it is.
-        unsafe { &mut *val_ptr }
+    fn cast_value_to_mut(val: &UnsafeCell<Value>) -> &mut Value {
+        unsafe { &mut *val.get() }
     }
 
     pub fn get_mut(&mut self, k: &Key) -> Option<&mut Value> {
-        self.map.get(k).map(cast_value_to_mut)
+        self.map.unsafe_get(k).map(cast_value_to_mut)
     }
 
     pub fn values_mut(&mut self) -> ValuesMut<'_, Key, Value> {
-        self.map.values().map(cast_value_to_mut)
+        self.map.unsafe_values().map(cast_value_to_mut)
     }
 
     pub fn iter_mut(&mut self) -> IterMut<'_, Key, Value> {
-        self.map.iter().map(|(k, v)| (k, cast_value_to_mut(v)))
+        self.map.unsafe_iter().map(|(k, v)| (k, cast_value_to_mut(v)))
     }
 }
 ```
+
+*EDIT: In a previous version of this article, `cast_value_to_mut` took a
+`&Value` as argument, and cast it to `&mut Value`. This is **never sound**, we
+need to use `UnsafeCell` instead. Our imaginary `MyHashMap` implementation
+returns `UnsafeCell`s in `unsafe_get`, `unsafe_values` and `unsafe_iter`. Those
+function should not be public, of course. That has to be built in to the type,
+the map needs to store the values wrapped in `UnsafeCell`. As such, you can't
+just implement that on top of a standard container.*
 
 We can provide `get_mut`: giving access to one mutable value at a time is okay.
 Since it borrows `self` as mut, the lifetime guarantees that we're not going to
@@ -305,7 +316,10 @@ pub fn make_mut_accessor<Key: Hash + Eq, Value>(
 
 This creates the two views of the map, mutable values and immutable structure.
 Note that we still take a `&mut map`, even though we're only storing `&map`:
-semantically, the accessor has a mutable access.
+semantically, the accessor has a mutable access, so we want to guarantee that
+no other references exist. In particular, the `MutMapValueAccessor` should not
+be publicly constructible, since it allows you to modify the values through an
+immutable reference.
 
 Now we can re-write our initial function:
 
@@ -345,8 +359,9 @@ As you saw, it's very easy to lure yourself through rational reasoning into an
 actually unsound situation that might lead to bugs way down the line. Whenever
 you want to go against the borrow checker, it's best to either suck it up and
 come up with a different, safe design, or really ask an expert about it. In
-this case, the good folks at the Rust discord helped me see the error of my
-ways.
+this case, the good folks at the Rust Discord and on /r/rust helped me see the
+error of my ways, and there were several mistakes in early drafts of this
+article.
 
 And if you _do_ end up using `unsafe`, make sure you install as many barriers
 as possible to avoid any misuse due to invalidated assumptions.
@@ -368,6 +383,11 @@ In this situation, it depends on your constraints:
    to elf and the elf storage by having a `HashMap<Position, usize>` and a
    `Vec<Elf>` (or `HashMap<usize, Elf>` if insertions/deletions are
    problematic). This is fairly typical for graphs.
+ - If you don't want to compromise on anything but you still control the API,
+   your only option might be to use `UnsafeCell` to wrap the values of your map.
+   But then it's up to you to _guarantee_ that the Rust assumptions are upheld,
+   in particular that you don't have a mutable and immutable reference to the
+   same thing alive at the same time.
  - Finally, sometimes having a long hard look at your domain causes you to
    completely rethink your data structure! For this problem, I ended up using a
    Big Enough&trade; pre-allocated `Vec<Option<Elf>>` for every possible
