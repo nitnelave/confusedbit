@@ -8,3 +8,7 @@ params:
     - "css/admonitions.css"
 relativeURLs: true
 enableEmoji: true
+markup:
+  goldmark:
+    renderer:
+      unsafe: true
