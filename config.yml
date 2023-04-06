@@ -12,3 +12,10 @@ markup:
   goldmark:
     renderer:
       unsafe: true
+
+defaultContentLanguage: en
+languages:
+  en:
+    weight: 1
+  fr:
+    weight: 2
