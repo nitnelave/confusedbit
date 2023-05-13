@@ -4,6 +4,7 @@ title: Confused bit
 theme:
   - "PaperMod"
 params:
+  ShowPostNavLinks: true
   custom_css:
     - "css/admonitions.css"
 relativeURLs: true
@@ -12,6 +13,12 @@ markup:
   goldmark:
     renderer:
       unsafe: true
+menu:
+  main:
+    - identifier: about
+      name: About me
+      url: /about/
+      weight: 10
 
 defaultContentLanguage: en
 languages:
